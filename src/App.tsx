@@ -18,6 +18,12 @@ import {
   type TimeChoice,
 } from './lib/merge';
 import {
+  buildEditedCues,
+  buildSegmentSpans,
+  editedTotalDuration,
+  parseSegments,
+} from './lib/edit';
+import {
   analyzePace,
   applyPaceFixes,
   DEFAULT_PACE_OPTIONS,
@@ -36,6 +42,7 @@ import {
 import { smartWrap, type WrapOptions } from './lib/wrap';
 import { CalibratePanel } from './components/CalibratePanel';
 import { DedupePanel } from './components/DedupePanel';
+import { EditPanel } from './components/EditPanel';
 import { ExportPanel } from './components/ExportPanel';
 import { GroupCard } from './components/GroupCard';
 import { ImportPanel } from './components/ImportPanel';
@@ -101,7 +108,7 @@ export default function App() {
   const cuesBEff: Cue[] = groups ? (cuesBUsed ?? cuesB) : cuesB;
 
   // 智能断行：视图切换、参数与逐条应用状态（key 为 groupIndex）
-  const [view, setView] = useState<'groups' | 'dedupe' | 'wrap' | 'pace' | 'snap'>('groups');
+  const [view, setView] = useState<'groups' | 'dedupe' | 'wrap' | 'pace' | 'snap' | 'edit'>('groups');
   const [wrapOpts, setWrapOpts] = useState<WrapOptions>({
     maxWidth: 42,
     maxLines: 2,
@@ -125,6 +132,10 @@ export default function App() {
   const [snapOpts, setSnapOpts] = useState<SnapOptions>(DEFAULT_SNAP_OPTIONS);
   const [snapAccepted, setSnapAccepted] = useState<ReadonlySet<string>>(new Set());
   const cutParse = useMemo(() => parseCutList(cutText), [cutText]);
+
+  // 剪辑版字幕（独立模块，只读 finalCues）：源片段列表文本（每行 起点ms 终点ms），
+  // 输入或上游结果变化时通过 useMemo 立即重算，不写回合并结果
+  const [segmentText, setSegmentText] = useState('');
 
   // 重新校准并迁移审校决定：从工作区进入校准页时保留旧 groups/states；
   // 新对齐算出后先在弹窗中预览迁移方案，确认后才一次提交，取消则旧工作区原封不动。
@@ -604,6 +615,47 @@ export default function App() {
   const unresolved = states.filter((s) => !s.resolved).length;
   const canExport = !!groups && unresolved === 0 && issues.length === 0 && finalCues.length > 0;
 
+  // 剪辑版字幕：解析片段列表 → 在最终合并结果上裁切重排。输入或上游 finalCues
+  // 变化立即重算；仅读取 finalCues，绝不修改合并结果。
+  const segParse = useMemo(() => parseSegments(segmentText), [segmentText]);
+  const editedCues = useMemo(
+    () => buildEditedCues(finalCues, segParse.segments),
+    [finalCues, segParse],
+  );
+  const editedSpans = useMemo(
+    () => buildSegmentSpans(segParse.segments, editedCues),
+    [segParse, editedCues],
+  );
+  const editedDuration = useMemo(
+    () => editedTotalDuration(segParse.segments),
+    [segParse],
+  );
+  const editedSrt = useMemo(() => serializeSrt(editedCues), [editedCues]);
+  const editedPreview = useMemo(() => {
+    const full = editedSrt;
+    return full.length > 20000
+      ? `${full.slice(0, 20000)}\n…（共 ${editedCues.length} 条，预览已截断）`
+      : full;
+  }, [editedSrt, editedCues.length]);
+  // 下载门槛：片段无格式错误、上游可导出、剪辑结果非空
+  const editedReason =
+    !groups
+      ? '尚无上游结果'
+      : unresolved > 0
+        ? `上游还有 ${unresolved} 个未解决冲突`
+        : issues.length > 0
+          ? `上游存在 ${issues.length} 个校验错误`
+          : finalCues.length === 0
+            ? '上游结果为空'
+            : segParse.invalid.length > 0
+              ? `片段列表第 ${segParse.invalid.map((b) => b.line).join('、')} 行格式错误`
+              : segParse.segments.length === 0
+                ? '请先填写源片段列表'
+                : editedCues.length === 0
+                  ? '所有片段均未与字幕相交，剪辑结果为空'
+                  : '';
+  const canDownloadEdited = editedReason === '';
+
   const preview = useMemo(() => {
     if (!groups) return '';
     const full = serializeSrt(finalCues);
@@ -775,6 +827,13 @@ export default function App() {
                     镜头切点吸附
                     <span className="tab-count">{snapStats.applied}</span>
                   </button>
+                  <button
+                    className={`tab ${view === 'edit' ? 'active' : ''}`}
+                    onClick={() => setView('edit')}
+                  >
+                    剪辑版字幕
+                    <span className="tab-count">{editedCues.length}</span>
+                  </button>
                 </div>
                 {view === 'groups' ? (
                   <>
@@ -862,6 +921,22 @@ export default function App() {
                     onRestore={restoreSnap}
                     onAcceptAll={acceptAllSnaps}
                     onRestoreAll={restoreAllSnaps}
+                  />
+                )}
+                {view === 'edit' && (
+                  <EditPanel
+                    sourceCount={finalCues.length}
+                    sourceReady={canExport}
+                    segmentText={segmentText}
+                    onSegmentText={setSegmentText}
+                    parsed={segParse}
+                    edited={editedCues}
+                    spans={editedSpans}
+                    totalDuration={editedDuration}
+                    preview={editedPreview}
+                    canDownload={canDownloadEdited}
+                    downloadReason={editedReason}
+                    onDownload={() => download('edited.srt', '\uFEFF' + editedSrt)}
                   />
                 )}
               </main>
