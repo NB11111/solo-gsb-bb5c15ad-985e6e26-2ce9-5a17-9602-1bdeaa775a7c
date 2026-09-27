@@ -6,6 +6,7 @@ import {
   selectAnchors,
   type CalibOptions,
 } from './lib/calibrate';
+import { buildClipCues, parseClipList } from './lib/clip';
 import { migrateStates, planMigration, type MigrationPlan } from './lib/migrate';
 import {
   autoFixTimes,
@@ -35,6 +36,7 @@ import {
 } from './lib/snap';
 import { smartWrap, type WrapOptions } from './lib/wrap';
 import { CalibratePanel } from './components/CalibratePanel';
+import { ClipPanel } from './components/ClipPanel';
 import { DedupePanel } from './components/DedupePanel';
 import { ExportPanel } from './components/ExportPanel';
 import { GroupCard } from './components/GroupCard';
@@ -101,7 +103,9 @@ export default function App() {
   const cuesBEff: Cue[] = groups ? (cuesBUsed ?? cuesB) : cuesB;
 
   // 智能断行：视图切换、参数与逐条应用状态（key 为 groupIndex）
-  const [view, setView] = useState<'groups' | 'dedupe' | 'wrap' | 'pace' | 'snap'>('groups');
+  const [view, setView] = useState<'groups' | 'dedupe' | 'wrap' | 'pace' | 'snap' | 'clip'>(
+    'groups',
+  );
   const [wrapOpts, setWrapOpts] = useState<WrapOptions>({
     maxWidth: 42,
     maxLines: 2,
@@ -125,6 +129,10 @@ export default function App() {
   const [snapOpts, setSnapOpts] = useState<SnapOptions>(DEFAULT_SNAP_OPTIONS);
   const [snapAccepted, setSnapAccepted] = useState<ReadonlySet<string>>(new Set());
   const cutParse = useMemo(() => parseCutList(cutText), [cutText]);
+
+  // 剪辑版字幕：片段文本（每行 起点毫秒 终点毫秒，行序即成片顺序）；
+  // 只读最终合并结果，输入或上游变化时经 useMemo 立即重算，不改原合并结果
+  const [clipText, setClipText] = useState('');
 
   // 重新校准并迁移审校决定：从工作区进入校准页时保留旧 groups/states；
   // 新对齐算出后先在弹窗中预览迁移方案，确认后才一次提交，取消则旧工作区原封不动。
@@ -612,6 +620,22 @@ export default function App() {
       : full;
   }, [groups, finalCues]);
 
+  // 剪辑版字幕：基于最终合并结果（与导出同源）按片段列表重排时间轴；
+  // 片段文本或上游结果任一变化都会立即重算，且只读 finalCues、不改原合并结果
+  const clipParse = useMemo(() => parseClipList(clipText), [clipText]);
+  const clipResult = useMemo(
+    () => buildClipCues(finalCues, clipParse.segments),
+    [finalCues, clipParse],
+  );
+  const clipSrt = useMemo(() => serializeSrt(clipResult.cues), [clipResult]);
+  const clipPreview = useMemo(
+    () =>
+      clipSrt.length > 20000
+        ? `${clipSrt.slice(0, 20000)}\n…（共 ${clipResult.cues.length} 条，预览已截断）`
+        : clipSrt,
+    [clipSrt, clipResult],
+  );
+
   const counts = useMemo(() => {
     const c: Record<Filter, number> = { all: 0, unresolved: 0, low: 0, aonly: 0, bonly: 0 };
     if (!groups) return c;
@@ -775,6 +799,13 @@ export default function App() {
                     镜头切点吸附
                     <span className="tab-count">{snapStats.applied}</span>
                   </button>
+                  <button
+                    className={`tab ${view === 'clip' ? 'active' : ''}`}
+                    onClick={() => setView('clip')}
+                  >
+                    剪辑版字幕
+                    <span className="tab-count">{clipResult.cues.length}</span>
+                  </button>
                 </div>
                 {view === 'groups' ? (
                   <>
@@ -848,7 +879,7 @@ export default function App() {
                     onAcceptAll={acceptAllPace}
                     onRestoreAll={restoreAllPace}
                   />
-                ) : (
+                ) : view === 'snap' ? (
                   <SnapPanel
                     cues={pacedCues}
                     plan={snapPlan}
@@ -862,6 +893,17 @@ export default function App() {
                     onRestore={restoreSnap}
                     onAcceptAll={acceptAllSnaps}
                     onRestoreAll={restoreAllSnaps}
+                  />
+                ) : (
+                  <ClipPanel
+                    upstreamCount={finalCues.length}
+                    upstreamReady={canExport}
+                    clipText={clipText}
+                    onClipText={setClipText}
+                    parsed={clipParse}
+                    result={clipResult}
+                    preview={clipPreview}
+                    onExport={() => download('clipped.srt', '\uFEFF' + clipSrt)}
                   />
                 )}
               </main>
